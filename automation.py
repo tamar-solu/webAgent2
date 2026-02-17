@@ -1,5 +1,4 @@
 # automation_print_to_pdf.py
-import base64
 import os
 import time
 from datetime import datetime, timedelta
@@ -57,74 +56,55 @@ def open_report_view(page) -> None:
 
 def print_then_save_pdf(context, page, save_path: Path) -> None:
     """
-    Click 'Print' in the Stimulsoft viewer.  Stimulsoft creates a hidden
-    iframe (#stiPrintReportFrame) with the report as full HTML, then calls
-    window.print().  We block window.print(), extract that HTML, inject a
-    <base> tag so resources resolve, and use CDP Page.printToPDF on a fresh
-    page to produce a PDF identical to Chrome's "Print → Save as PDF".
+    Click 'Print' in the viewer (like your recording), then save to PDF via page.pdf().
+    Works in headless chromium (required for PDF generation).
     """
 
-    # Block window.print() so the native dialog never opens
-    page.evaluate("""() => {
-        window.__printCalled = false;
-        window.print = function() { window.__printCalled = true; };
-    }""")
+    # Many Stimulsoft viewers open a popup/new page for print preview.
+    # We'll try to catch it; if not, we will print current page.
+    popup = None
+    try:
+        with context.expect_page(timeout=5_000) as popup_info:
+            # Your recorded click: "Print" cell (often appears in a menu)
+            # If you have a different selector that reliably opens Print menu, swap it here.
+            page.get_by_role("cell", name="Print").nth(2).click()
+        popup = popup_info.value
+    except PWTimeoutError:
+        # No popup opened; maybe print preview is in same tab OR selector didn't open menu.
+        # Try another common print trigger: a visible "Print" text
+        try:
+            page.get_by_text("Print", exact=True).click(timeout=2_000)
+        except:
+            pass
 
-    # Click the Print toolbar button
-    page.get_by_role("cell", name="Print").nth(2).click()
+    target = popup if popup else page
 
-    # Wait for Stimulsoft to build the print iframe
-    page.locator("#stiPrintReportFrame").wait_for(state="attached", timeout=30_000)
-    page.wait_for_timeout(2_000)  # let it finish rendering
+    # Wait for something meaningful to render (viewer/print content)
+    # We don't know exact DOM, so we wait for load + a short settle.
+    try:
+        target.wait_for_load_state("domcontentloaded", timeout=60_000)
+    except:
+        pass
+    try:
+        target.wait_for_load_state("networkidle", timeout=60_000)
+    except:
+        pass
+    target.wait_for_timeout(1500)
 
-    # Get the base URL so relative resources in the iframe HTML resolve
-    base_url = page.evaluate("() => window.location.origin")
+    # Generate PDF (Chromium headless only)
+    target.pdf(
+        path=str(save_path),
+        print_background=True,
+        prefer_css_page_size=True,
+    )
 
-    # Extract the full HTML from the print iframe and inject <base>
-    print_html = page.evaluate("""([baseUrl]) => {
-        const iframe = document.getElementById('stiPrintReportFrame');
-        if (!iframe || !iframe.contentDocument) return null;
-        const doc = iframe.contentDocument;
-        // Inject <base> tag so relative URLs resolve against the original site
-        if (!doc.querySelector('base')) {
-            const base = doc.createElement('base');
-            base.href = baseUrl;
-            doc.head.prepend(base);
-        }
-        return doc.documentElement.outerHTML;
-    }""", [base_url])
-
-    if not print_html:
-        Path("debug").mkdir(exist_ok=True)
-        page.screenshot(path="debug/print_iframe_missing.png", full_page=True)
-        raise RuntimeError("Could not extract HTML from #stiPrintReportFrame")
-
-    # Open a fresh page, load the print HTML, and generate the PDF via CDP
-    print_page = context.new_page()
-    print_page.set_content(print_html, wait_until="networkidle")
-    print_page.wait_for_timeout(2_000)
-
-    cdp = context.new_cdp_session(print_page)
-    result = cdp.send("Page.printToPDF", {
-        "printBackground": False,
-        "preferCSSPageSize": True,
-    })
-    cdp.detach()
-    print_page.close()
-
-    pdf_bytes = base64.b64decode(result["data"])
-    save_path.write_bytes(pdf_bytes)
-
-    # Clean up the print iframe from the original page
-    page.evaluate("""() => {
-        const f = document.getElementById('stiPrintReportFrame');
-        if (f) f.remove();
-    }""")
+    if popup:
+        popup.close()
 
     if not save_path.exists() or save_path.stat().st_size < 5_000:
         Path("debug").mkdir(exist_ok=True)
         page.screenshot(path="debug/print_pdf_too_small_or_missing.png", full_page=True)
-        raise RuntimeError(f"PDF missing/too small after print: {save_path}")
+        raise RuntimeError(f"PDF missing/too small after print->pdf: {save_path}")
 
 
 def run() -> None:
