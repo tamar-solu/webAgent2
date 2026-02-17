@@ -1,0 +1,4 @@
+requests>=2.28.0
+python-dotenv>=1.0.0
+# Optional for PRES_USE_NATIVE_PRINT=1 (automate native print dialog with keyboard):
+# pyautogui>=1.0.0
