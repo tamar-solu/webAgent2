@@ -1,3 +1,5 @@
+# automation_print_to_pdf.py
+import base64
 import os
 import time
 from datetime import datetime, timedelta
@@ -19,8 +21,8 @@ def yesterday_str_il(fmt: str = "%d/%m/%Y") -> str:
     y = datetime.now(ZoneInfo("Asia/Jerusalem")).date() - timedelta(days=1)
     return y.strftime(fmt)
 
-
 def set_date_input(page, selector: str, value: str) -> None:
+    # set value + dispatch events so site commits it
     page.evaluate(
         """([sel, val]) => {
             const el = document.querySelector(sel);
@@ -52,12 +54,45 @@ def open_report_view(page) -> None:
     page.locator("#report-view-back-btn").wait_for(state="visible", timeout=180_000)
 
 
+def _extract_pdf_from_frame_html(target) -> bytes | None:
+    """
+    Stimulsoft writes print-ready HTML directly into stiPrintReportFrame
+    (src=about:blank). Extract that HTML, load it into a clean temporary page
+    with no viewer chrome, and generate a proper PDF from it.
+    """
+    sti_frame = target.frame(name="stiPrintReportFrame")
+    if sti_frame is None:
+        el = target.query_selector("#stiPrintReportFrame")
+        if el:
+            sti_frame = el.content_frame()
+
+    if sti_frame is None:
+        print("  stiPrintReportFrame not found")
+        return None
+
+    html = sti_frame.content()
+    print(f"  frame HTML: {len(html):,} chars")
+
+    temp_page = target.context.new_page()
+    try:
+        temp_page.set_content(html, wait_until="domcontentloaded")
+        temp_page.wait_for_timeout(500)
+        pdf_bytes = temp_page.pdf(
+            print_background=False,
+            prefer_css_page_size=True,
+        )
+        print(f"  PDF from frame HTML: {len(pdf_bytes):,} bytes")
+        return pdf_bytes
+    finally:
+        temp_page.close()
+
+
 def print_then_save_pdf(context, page, save_path: Path) -> None:
     """
-    Click 'Print' in the viewer (like your recording), then save to PDF via page.pdf().
-    Works in headless chromium (required for PDF generation).
+    Click 'Print' to open the Stimulsoft viewer popup, extract the PDF from
+    the blob URL the viewer creates, and save it directly.
+    Falls back to page.pdf() if blob extraction fails.
     """
-
     popup = None
     try:
         with context.expect_page(timeout=5_000) as popup_info:
@@ -66,27 +101,31 @@ def print_then_save_pdf(context, page, save_path: Path) -> None:
     except PWTimeoutError:
         try:
             page.get_by_text("Print", exact=True).click(timeout=2_000)
-        except:
+        except Exception:
             pass
 
     target = popup if popup else page
 
     try:
         target.wait_for_load_state("domcontentloaded", timeout=60_000)
-    except:
+    except PWTimeoutError:
         pass
     try:
         target.wait_for_load_state("networkidle", timeout=60_000)
-    except:
+    except PWTimeoutError:
         pass
-    target.wait_for_timeout(1500)
+    # Extra time for Stimulsoft to finish generating the PDF blob
+    target.wait_for_timeout(3_000)
 
-    # Generate PDF (Chromium headless only)
-    target.pdf(
-        path=str(save_path),
-        print_background=True,
-        prefer_css_page_size=True,
-    )
+    # Attempt 1: extract clean HTML from stiPrintReportFrame and render to PDF
+    pdf_bytes = _extract_pdf_from_frame_html(target)
+    if pdf_bytes:
+        save_path.write_bytes(pdf_bytes)
+        print(f"PDF saved from frame HTML ({len(pdf_bytes):,} bytes)")
+    else:
+        # Fallback: page.pdf() — captures viewer chrome but always produces output
+        print("Frame extraction failed, falling back to page.pdf()")
+        target.pdf(path=str(save_path), print_background=True, prefer_css_page_size=True)
 
     if popup:
         popup.close()
