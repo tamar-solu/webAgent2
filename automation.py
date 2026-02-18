@@ -1,4 +1,3 @@
-# automation_print_to_pdf.py
 import os
 import time
 from datetime import datetime, timedelta
@@ -22,7 +21,6 @@ def yesterday_str_il(fmt: str = "%d/%m/%Y") -> str:
 
 
 def set_date_input(page, selector: str, value: str) -> None:
-    # set value + dispatch events so site commits it
     page.evaluate(
         """([sel, val]) => {
             const el = document.querySelector(sel);
@@ -60,18 +58,12 @@ def print_then_save_pdf(context, page, save_path: Path) -> None:
     Works in headless chromium (required for PDF generation).
     """
 
-    # Many Stimulsoft viewers open a popup/new page for print preview.
-    # We'll try to catch it; if not, we will print current page.
     popup = None
     try:
         with context.expect_page(timeout=5_000) as popup_info:
-            # Your recorded click: "Print" cell (often appears in a menu)
-            # If you have a different selector that reliably opens Print menu, swap it here.
             page.get_by_role("cell", name="Print").nth(2).click()
         popup = popup_info.value
     except PWTimeoutError:
-        # No popup opened; maybe print preview is in same tab OR selector didn't open menu.
-        # Try another common print trigger: a visible "Print" text
         try:
             page.get_by_text("Print", exact=True).click(timeout=2_000)
         except:
@@ -79,8 +71,6 @@ def print_then_save_pdf(context, page, save_path: Path) -> None:
 
     target = popup if popup else page
 
-    # Wait for something meaningful to render (viewer/print content)
-    # We don't know exact DOM, so we wait for load + a short settle.
     try:
         target.wait_for_load_state("domcontentloaded", timeout=60_000)
     except:
